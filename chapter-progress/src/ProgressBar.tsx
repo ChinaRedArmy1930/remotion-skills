@@ -1,7 +1,7 @@
 import React from 'react';
 import { AbsoluteFill, useCurrentFrame, interpolate } from 'remotion';
 import type { TimedNode } from './types';
-import { getMaxDepth, getNodesAtDepth } from './timing';
+import { getMaxDepth } from './timing';
 import type { ThemeConfig } from './styles';
 
 interface ProgressBarProps {
@@ -22,57 +22,132 @@ interface Block {
 }
 
 /**
- * 将指定深度的节点转换为色块布局
+ * 从 TimedNode 树构建火焰图布局。
+ * rows[0] = depth 1, rows[1] = depth 2, ...
+ * 父节点宽度 = 所有子节点宽度之和，子节点严格对齐在父节点上方。
  */
-function buildBlocks(
+function buildFlameBlocks(
   tree: TimedNode,
-  depth: number,
-  totalFrames: number,
+  maxDisplayDepth: number,
   usableWidth: number,
   sidePadding: number
-): Block[] {
-  const nodes = getNodesAtDepth(tree, depth);
-  return nodes.map((node) => ({
-    label: node.label,
-    x: sidePadding + (node.startFrame / totalFrames) * usableWidth,
-    width: ((node.endFrame - node.startFrame) / totalFrames) * usableWidth,
-    depth: node.depth,
-    startFrame: node.startFrame,
-    endFrame: node.endFrame,
-  }));
+): Block[][] {
+  const rows: Block[][] = [];
+
+  function getDuration(node: TimedNode): number {
+    if (node.children.length === 0) {
+      return node.endFrame - node.startFrame;
+    }
+    return node.children.reduce((sum, c) => sum + getDuration(c), 0);
+  }
+
+  function ensureRow(idx: number) {
+    while (rows.length <= idx) rows.push([]);
+  }
+
+  function layoutLevel(
+    nodes: TimedNode[],
+    startX: number,
+    totalWidth: number
+  ): Block[] {
+    const totalDuration = nodes.reduce((sum, n) => sum + getDuration(n), 0);
+    let currentX = startX;
+    const blocks: Block[] = [];
+
+    for (const node of nodes) {
+      const dur = getDuration(node);
+      const w = totalDuration > 0 ? (dur / totalDuration) * totalWidth : 0;
+      blocks.push({
+        label: node.label,
+        x: currentX,
+        width: w,
+        depth: node.depth,
+        startFrame: node.startFrame,
+        endFrame: node.endFrame,
+      });
+
+      // 递归布局子节点，存入对应的 row
+      if (node.children.length > 0 && node.depth < maxDisplayDepth) {
+        const childRowIdx = node.depth; // depth 1 的子节点放 rows[1]
+        ensureRow(childRowIdx);
+        const childBlocks = layoutLevel(node.children, currentX, w);
+        rows[childRowIdx].push(...childBlocks);
+      }
+
+      currentX += w;
+    }
+
+    return blocks;
+  }
+
+  // 布局 depth 1（底层）
+  ensureRow(0);
+  rows[0] = layoutLevel(tree.children, sidePadding, usableWidth);
+
+  return rows.slice(0, maxDisplayDepth);
 }
 
-// 单个色块
-const IcicleBlock: React.FC<{
+// 单个"水杯"色块：边框始终可见，蓝色填充随进度增长
+const CupBlock: React.FC<{
   block: Block;
-  isActive: boolean;
-  color: string;
-  activeColor: string;
+  frame: number;
+  fillColor: string;
+  borderColor: string;
   textColor: string;
   fontSize: number;
   fontFamily: string;
   rowHeight: number;
-}> = ({ block, isActive, color, activeColor, textColor, fontSize, fontFamily, rowHeight }) => {
-  const showLabel = block.width > 40;
+  isFirst: boolean;
+  isLast: boolean;
+}> = ({ block, frame, fillColor, borderColor, textColor, fontSize, fontFamily, rowHeight, isFirst, isLast }) => {
+  const showLabel = block.width > 36;
+
+  // 计算填充进度
+  const duration = block.endFrame - block.startFrame;
+  const elapsed = frame - block.startFrame;
+  const fillProgress = duration > 0
+    ? Math.min(Math.max(elapsed / duration, 0), 1)
+    : 0;
+
+  // 边框：左右和底边，根据是否是行首/行尾决定左边/右边
+  const borderLeft = isFirst ? `2px solid ${borderColor}` : `1px solid ${borderColor}`;
+  const borderRight = isLast ? `2px solid ${borderColor}` : `1px solid ${borderColor}`;
 
   return (
     <div
       style={{
         position: 'absolute',
         left: block.x,
-        width: Math.max(block.width - 1, 0), // 1px 间距
+        width: block.width,
         height: rowHeight,
-        background: isActive ? activeColor : color,
-        borderRadius: 2,
+        borderTop: `2px solid ${borderColor}`,
+        borderBottom: `2px solid ${borderColor}`,
+        borderLeft,
+        borderRight,
+        overflow: 'hidden',
+        boxSizing: 'border-box',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        overflow: 'hidden',
       }}
     >
+      {/* 蓝色填充：从左向右增长 */}
+      <div
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: `${fillProgress * 100}%`,
+          background: fillColor,
+        }}
+      />
+      {/* 标签文字 */}
       {showLabel && (
         <span
           style={{
+            position: 'relative',
+            zIndex: 1,
             color: textColor,
             fontSize,
             fontFamily,
@@ -80,8 +155,8 @@ const IcicleBlock: React.FC<{
             whiteSpace: 'nowrap',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
-            paddingLeft: 6,
-            paddingRight: 6,
+            paddingLeft: 4,
+            paddingRight: 4,
           }}
         >
           {block.label}
@@ -101,18 +176,18 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   const frame = useCurrentFrame();
   const maxDepth = getMaxDepth(tree);
 
-  // 显示的层级：depth 1 到 maxDepth（最多3层）
   const displayLevels = Math.min(maxDepth, 3);
   const usableWidth = width - theme.sidePadding * 2;
 
-  const totalBarHeight = displayLevels * theme.rowHeight + (displayLevels - 1) * theme.rowGap;
+  const rowHeight = theme.rowHeight;
+  const rowGap = theme.rowGap;
+  const totalBarHeight = displayLevels * rowHeight + (displayLevels - 1) * rowGap;
   const barBottom = theme.bottomPadding;
 
-  // 播放头位置
-  const progress = frame / totalFrames;
-  const playheadX = theme.sidePadding + progress * usableWidth;
+  // 构建火焰图布局
+  const rows = buildFlameBlocks(tree, displayLevels, usableWidth, theme.sidePadding);
 
-  // 顶部标签 - 显示当前正在播放的章节名
+  // 当前章节标题
   const allNodes = flattenNodesSimple(tree);
   const currentNode = allNodes
     .filter((n) => frame >= n.startFrame && frame <= n.endFrame)
@@ -152,64 +227,40 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
           height: totalBarHeight,
         }}
       >
-        {/* 背景渐变 */}
-        <div
-          style={{
-            position: 'absolute',
-            inset: -10,
-            background: 'linear-gradient(to bottom, rgba(0,0,0,0), rgba(0,0,0,0.3))',
-            borderRadius: 4,
-          }}
-        />
-
-        {/* 从下到上：depth 1 (底部) → depth N (顶部) */}
-        {Array.from({ length: displayLevels }, (_, i) => {
-          const depth = i + 1; // depth 1, 2, 3
-          const colorIdx = i % theme.levelColors.length;
-          const blocks = buildBlocks(tree, depth, totalFrames, usableWidth, theme.sidePadding);
-          const rowBottom = i * (theme.rowHeight + theme.rowGap);
+        {/* 从下到上：row[0] = depth 1 (底部) → row[N-1] = depth N (顶部) */}
+        {rows.map((rowBlocks, rowIdx) => {
+          const colorIdx = rowIdx % theme.levelColors.length;
+          const rowBottom = rowIdx * (rowHeight + rowGap);
 
           return (
             <div
-              key={`row-${depth}`}
+              key={`row-${rowIdx}`}
               style={{
                 position: 'absolute',
                 bottom: rowBottom,
                 left: 0,
                 width,
-                height: theme.rowHeight,
+                height: rowHeight,
               }}
             >
-              {blocks.map((block, blockIdx) => (
-                <IcicleBlock
-                  key={`block-${depth}-${blockIdx}`}
+              {rowBlocks.map((block, blockIdx) => (
+                <CupBlock
+                  key={`block-${rowIdx}-${blockIdx}`}
                   block={block}
-                  isActive={frame >= block.startFrame && frame <= block.endFrame}
-                  color={theme.levelColors[colorIdx]}
-                  activeColor={theme.levelActiveColors[colorIdx]}
+                  frame={frame}
+                  fillColor={theme.levelColors[colorIdx]}
+                  borderColor={theme.borderColor}
                   textColor={theme.textColor}
                   fontSize={theme.textFontSize}
                   fontFamily={theme.fontFamily}
-                  rowHeight={theme.rowHeight}
+                  rowHeight={rowHeight}
+                  isFirst={blockIdx === 0}
+                  isLast={blockIdx === rowBlocks.length - 1}
                 />
               ))}
             </div>
           );
         })}
-
-        {/* 播放头竖线 */}
-        <div
-          style={{
-            position: 'absolute',
-            left: playheadX - theme.playheadWidth / 2,
-            bottom: -6,
-            width: theme.playheadWidth,
-            height: totalBarHeight + 12,
-            background: theme.playheadColor,
-            borderRadius: 1,
-            boxShadow: `0 0 6px ${theme.playheadColor}`,
-          }}
-        />
       </div>
     </AbsoluteFill>
   );
