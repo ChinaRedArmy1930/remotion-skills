@@ -3,9 +3,8 @@ import { Composition, registerRoot, getInputProps } from 'remotion';
 import {
   MindMap,
   DEMO_DATA,
-  calcTotalFrames,
-  calcAppearFrames,
 } from './MindMap';
+import { calcTotalFrames, calcAppearFrames } from './timing';
 import { TechTheme } from './styles';
 import { layoutMindMap } from './layout';
 import type { MindMapNode } from './layout';

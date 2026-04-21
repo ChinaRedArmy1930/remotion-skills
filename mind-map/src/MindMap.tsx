@@ -14,19 +14,24 @@ import {
   flattenNodes,
 } from './layout';
 import { ThemeConfig, getNodeStyle } from './styles';
+import {
+  FRAMES_PER_CHAR,
+  calcAppearFrames,
+  calcTotalFrames,
+  calcNodeIntervals,
+} from './timing';
+import { ProgressBar } from './ProgressBar';
 
 interface MindMapProps {
   data: DataType;
   theme: ThemeConfig;
 }
 
-const FRAMES_PER_DEPTH = 30;
-const FRAMES_PER_SIBLING = 8;
 const LINE_GROW_DURATION = 25;
-const FRAMES_PER_CHAR = 5;
 
 const CANVAS_W = 1920;
 const CANVAS_H = 1080;
+const PROGRESS_BAR_HEIGHT = 90;
 
 export const DEMO_DATA: DataType = {
   label: '人工智能',
@@ -70,34 +75,6 @@ function getNodeSize(depth: number) {
   return { w: 130, h: 38 };
 }
 
-function calcAppearFrames(root: LayoutNode): Map<string, number> {
-  const map = new Map<string, number>();
-  map.set(root.id, 0);
-
-  function walk(parent: LayoutNode, parentFrame: number) {
-    const sorted = [...parent.children].sort((a, b) => a.y - b.y);
-    sorted.forEach((child, idx) => {
-      const frame = parentFrame + FRAMES_PER_DEPTH + idx * FRAMES_PER_SIBLING;
-      map.set(child.id, frame);
-      walk(child, frame);
-    });
-  }
-
-  walk(root, 0);
-  return map;
-}
-
-function calcTotalFrames(root: LayoutNode, appearFrames: Map<string, number>): number {
-  const allNodes = flattenNodes(root);
-  let maxFrame = 0;
-  for (const node of allNodes) {
-    const af = appearFrames.get(node.id) ?? 0;
-    const typeEnd = af + 12 + node.label.length * FRAMES_PER_CHAR;
-    if (typeEnd > maxFrame) maxFrame = typeEnd;
-  }
-  return maxFrame + 30;
-}
-
 // 预计算每帧的居中偏移量（只看已出现的节点的几何中心）
 function precalcOffsets(
   allNodes: LayoutNode[],
@@ -122,11 +99,11 @@ function precalcOffsets(
       nodeIdx++;
     }
     if (count === 0) {
-      offsets.push({ dx: CANVAS_W / 2, dy: CANVAS_H / 2 });
+      offsets.push({ dx: CANVAS_W / 2, dy: (CANVAS_H - PROGRESS_BAR_HEIGHT) / 2 });
     } else {
       offsets.push({
         dx: CANVAS_W / 2 - sumX / count,
-        dy: CANVAS_H / 2 - sumY / count,
+        dy: (CANVAS_H - PROGRESS_BAR_HEIGHT) / 2 - sumY / count,
       });
     }
   }
@@ -267,6 +244,7 @@ export const MindMap: React.FC<MindMapProps> = ({ data, theme }) => {
   const allNodes = flattenNodes(layout);
   const appearFrames = calcAppearFrames(layout);
   const totalFrames = calcTotalFrames(layout, appearFrames);
+  const intervals = calcNodeIntervals(layout, appearFrames);
 
   // 预计算每帧的目标偏移
   const offsets = precalcOffsets(allNodes, appearFrames, totalFrames);
@@ -275,7 +253,7 @@ export const MindMap: React.FC<MindMapProps> = ({ data, theme }) => {
   const alpha = 0.12;
   const smoothedOffsets: { dx: number; dy: number }[] = [];
   let emaDx = CANVAS_W / 2;
-  let emaDy = CANVAS_H / 2;
+  let emaDy = (CANVAS_H - PROGRESS_BAR_HEIGHT) / 2;
   for (let i = 0; i < offsets.length; i++) {
     emaDx += alpha * (offsets[i].dx - emaDx);
     emaDy += alpha * (offsets[i].dy - emaDy);
@@ -329,8 +307,13 @@ export const MindMap: React.FC<MindMapProps> = ({ data, theme }) => {
           />
         ))}
       </div>
+      <ProgressBar
+        intervals={intervals}
+        rootId={layout.id}
+        totalFrames={totalFrames}
+        theme={theme}
+      />
     </AbsoluteFill>
   );
 };
 
-export { calcTotalFrames, calcAppearFrames };

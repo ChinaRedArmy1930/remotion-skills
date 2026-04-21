@@ -12,6 +12,8 @@ export interface ThemeConfig {
   rootFontSize: number;
   nodeFontSize: number;
   nodeShadow: string;
+  progressBarColors?: string[];
+  playheadColor?: string;
 }
 
 // 简约蓝白主题
@@ -29,6 +31,8 @@ export const TechTheme: ThemeConfig = {
   rootFontSize: 18,
   nodeFontSize: 14,
   nodeShadow: '0 1px 6px rgba(0,0,0,0.06)',
+  progressBarColors: ['#4a90d9', '#5ba0e8', '#6db3f0'],
+  playheadColor: '#ff6b6b',
 };
 
 export function getNodeStyle(theme: ThemeConfig, depth: number) {
