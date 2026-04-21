@@ -1,0 +1,22 @@
+{
+  "data": {
+    "label": "前端技术栈",
+    "children": [
+      {
+        "label": "框架",
+        "children": [
+          { "label": "React" },
+          { "label": "Vue" },
+          { "label": "Angular" }
+        ]
+      },
+      {
+        "label": "构建工具",
+        "children": [
+          { "label": "Webpack" },
+          { "label": "Vite" }
+        ]
+      }
+    ]
+  }
+}
