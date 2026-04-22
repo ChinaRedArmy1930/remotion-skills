@@ -182,16 +182,23 @@ const CupBlock: React.FC<{
   isTopRow: boolean;
   isBottomRow: boolean;
   barRadius: number;
-}> = ({ block, frame, fillColor, surfaceColor, borderColor, textColor, fontSize, fontFamily, rowHeight, isFirst, isLast, isTopRow, isBottomRow, barRadius }) => {
+  breadcrumb?: string; // 底层色块专用：面包屑路径，如 "大语言模型→GPT系列"
+}> = ({ block, frame, fillColor, surfaceColor, borderColor, textColor, fontSize, fontFamily, rowHeight, isFirst, isLast, isTopRow, isBottomRow, barRadius, breadcrumb }) => {
   const duration = block.endFrame - block.startFrame;
   const elapsed = frame - block.startFrame;
   const fillProgress = duration > 0
     ? Math.min(Math.max(elapsed / duration, 0), 1)
     : 0;
 
-  // 当前正在播放的章节显示编号+名称，否则只显示名称
+  // 底层色块：有面包屑时显示面包屑，否则显示名称
+  // 上层色块：播放时显示编号+名称，否则只显示名称
   const isActive = frame >= block.startFrame && frame <= block.endFrame;
-  const displayLabel = isActive ? `${block.sectionNumber} ${block.label}` : block.label;
+  let displayLabel: string;
+  if (breadcrumb) {
+    displayLabel = breadcrumb;
+  } else {
+    displayLabel = isActive ? `${block.sectionNumber} ${block.label}` : block.label;
+  }
 
   const rtl = isTopRow && isFirst ? barRadius : 0;
   const rtr = isTopRow && isLast ? barRadius : 0;
@@ -255,7 +262,7 @@ const ScrollingLabel: React.FC<{
   const textRef = React.useRef<HTMLSpanElement>(null);
   const [textWidth, setTextWidth] = React.useState(0);
   const padding = 6;
-  const availableWidth = blockWidth - padding * 2 - 3; // 3 for border
+  const availableWidth = blockWidth - padding * 2 - 3;
 
   React.useEffect(() => {
     if (textRef.current) {
@@ -268,32 +275,12 @@ const ScrollingLabel: React.FC<{
 
   if (blockWidth < 36) return null;
 
-  if (!needsScroll) {
-    return (
-      <span
-        style={{
-          position: 'relative',
-          zIndex: 1,
-          color: textColor,
-          fontSize,
-          fontFamily,
-          fontWeight: 500,
-          letterSpacing: '-0.224px',
-          whiteSpace: 'nowrap',
-          textAlign: 'center',
-          width: availableWidth,
-        }}
-      >
-        {label}
-      </span>
-    );
-  }
-
+  // 滚动偏移：慢速滚动，播放结束后回到起始
   const scrollRange = textWidth - availableWidth;
-  const cycleFrames = 60;
+  const cycleFrames = 120; // 慢速：4秒一个来回
   const localFrame = isActive ? frame - startFrame : 0;
   const progress = (localFrame % cycleFrames) / cycleFrames;
-  const offset = scrollRange * (0.5 - 0.5 * Math.cos(progress * 2 * Math.PI));
+  const offset = (needsScroll && isActive) ? scrollRange * (0.5 - 0.5 * Math.cos(progress * 2 * Math.PI)) : 0;
 
   return (
     <div
@@ -302,6 +289,8 @@ const ScrollingLabel: React.FC<{
         zIndex: 1,
         overflow: 'hidden',
         width: availableWidth,
+        display: 'flex',
+        justifyContent: 'center',
       }}
     >
       <span
@@ -314,7 +303,8 @@ const ScrollingLabel: React.FC<{
           fontWeight: 500,
           letterSpacing: '-0.224px',
           whiteSpace: 'nowrap',
-          transform: `translateX(${-offset}px)`,
+          transform: needsScroll ? `translateX(${-offset}px)` : undefined,
+          textAlign: 'center',
         }}
       >
         {label}
@@ -343,7 +333,30 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   // 当前章节：显示 X.X.X 格式
   const sectionLabel = getCurrentSectionLabel(tree, frame);
 
-  const renderRow = (blocks: Block[], rowIdx: number, isTop: boolean, isBottom: boolean) => (
+  // 计算每个底层色块的面包屑路径
+  // 找到当前活跃的叶子节点，然后构建从底层章节到叶子直接父级的路径
+  const bottomBreadcrumbs = hasTwoRows ? bottomRow.map((bottomBlock, blockIdx) => {
+    if (!(frame >= bottomBlock.startFrame && frame <= bottomBlock.endFrame)) {
+      return undefined; // 非活跃的大章节，不显示面包屑
+    }
+    // 找到当前底层章节内活跃的叶子节点
+    const parentNode = tree.children[blockIdx];
+    const activeLeaf = findActiveLeaf(parentNode, frame);
+    if (!activeLeaf || activeLeaf.depth <= parentNode.depth + 1) {
+      return undefined; // 叶子直接是底层子节点（只有2层），不需要面包屑
+    }
+    // 构建从底层章节到叶子直接父级的带编号路径
+    const path = buildBreadcrumb(parentNode, activeLeaf, bottomBlock.sectionNumber);
+    return path ? `${bottomBlock.sectionNumber} ${bottomBlock.label}→${path}` : undefined;
+  }) : [];
+
+  const renderRow = (
+    blocks: Block[],
+    rowIdx: number,
+    isTop: boolean,
+    isBottom: boolean,
+    breadcrumbs?: (string | undefined)[]
+  ) => (
     <div
       key={`row-${rowIdx}`}
       style={{
@@ -371,6 +384,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
           isTopRow={isTop}
           isBottomRow={isBottom}
           barRadius={theme.barRadius}
+          breadcrumb={breadcrumbs?.[blockIdx]}
         />
       ))}
     </div>
@@ -429,7 +443,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
         {hasTwoRows ? (
           <>
             {renderRow(topRow!, 1, true, false)}
-            {renderRow(bottomRow, 0, false, true)}
+            {renderRow(bottomRow, 0, false, true, bottomBreadcrumbs)}
           </>
         ) : (
           renderRow(bottomRow, 0, true, true)
@@ -445,4 +459,41 @@ function flattenNodesSimple(node: TimedNode): TimedNode[] {
     result.push(...flattenNodesSimple(child));
   }
   return result;
+}
+
+/**
+ * 找到当前帧活跃的最深叶子节点
+ */
+function findActiveLeaf(node: TimedNode, frame: number): TimedNode | null {
+  if (node.children.length === 0) {
+    return (frame >= node.startFrame && frame <= node.endFrame) ? node : null;
+  }
+  for (const child of node.children) {
+    const result = findActiveLeaf(child, frame);
+    if (result) return result;
+  }
+  return null;
+}
+
+/**
+ * 从 parentNode 到 targetLeaf 的面包屑路径（不含 parentNode 本身）
+ * 带编号，例如 "1.2 开源模型"
+ */
+function buildBreadcrumb(parentNode: TimedNode, targetLeaf: TimedNode, parentSectionNumber: string): string | null {
+  function search(node: TimedNode, sectionPrefix: string, path: string[]): string[] | null {
+    if (node === targetLeaf) return path;
+    for (let i = 0; i < node.children.length; i++) {
+      const child = node.children[i];
+      const childSection = sectionPrefix ? `${sectionPrefix}.${i + 1}` : `${i + 1}`;
+      const label = `${childSection} ${child.label}`;
+      const result = search(child, childSection, [...path, label]);
+      if (result) return result;
+    }
+    return null;
+  }
+  // 从 parentNode 的子节点开始，用 parentSectionNumber 作为前缀
+  const result = search(parentNode, parentSectionNumber, []);
+  if (!result || result.length === 0) return null;
+  // 去掉最后一个（叶子节点自身），只保留中间路径
+  return result.slice(0, -1).join('→');
 }
