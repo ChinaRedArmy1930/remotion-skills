@@ -35,7 +35,7 @@ const DEMO_DATA: ChapterNode = {
 };
 
 // 读取输入数据
-const inputProps = getInputProps();
+const inputProps = getInputProps() as Record<string, unknown> | null;
 const propsData =
   inputProps && typeof inputProps === 'object' && 'data' in inputProps
     ? (inputProps as { data: ChapterNode }).data
@@ -45,12 +45,16 @@ const data: ChapterNode =
     ? propsData
     : DEMO_DATA;
 
-// 构建时间树
-const tree = calcTimedTree(data);
-const totalFrames = calcTotalFrames(tree);
+// 读取自定义参数
+const fontFamily = (inputProps?.fontFamily as string) || DefaultTheme.fontFamily;
+const videoWidth = (inputProps?.width as number) || 1920;
+const videoHeight = (inputProps?.height as number) || 1080;
 
-const VIDEO_WIDTH = 1920;
-const VIDEO_HEIGHT = 1080;
+// 构建时间树
+const tree = calcTimedTree(data, { chapterGap: 0 });
+const totalFrames = calcTotalFrames(tree, 0);
+
+const customTheme = { ...DefaultTheme, fontFamily };
 
 const RemotionRoot: React.FC = () => {
   return (
@@ -60,14 +64,14 @@ const RemotionRoot: React.FC = () => {
         component={ProgressBar}
         durationInFrames={totalFrames}
         fps={30}
-        width={VIDEO_WIDTH}
-        height={VIDEO_HEIGHT}
+        width={videoWidth}
+        height={videoHeight}
         defaultProps={{
           tree,
           totalFrames,
-          theme: DefaultTheme,
-          width: VIDEO_WIDTH,
-          height: VIDEO_HEIGHT,
+          theme: customTheme,
+          width: videoWidth,
+          height: videoHeight,
         }}
       />
     </>

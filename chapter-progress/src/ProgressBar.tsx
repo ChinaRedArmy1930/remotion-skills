@@ -99,9 +99,8 @@ const CupBlock: React.FC<{
   rowHeight: number;
   isFirst: boolean;
   isLast: boolean;
-}> = ({ block, frame, fillColor, borderColor, textColor, fontSize, fontFamily, rowHeight, isFirst, isLast }) => {
-  const showLabel = block.width > 36;
-
+  isTopRow: boolean;
+}> = ({ block, frame, fillColor, borderColor, textColor, fontSize, fontFamily, rowHeight, isFirst, isLast, isTopRow }) => {
   // 计算填充进度
   const duration = block.endFrame - block.startFrame;
   const elapsed = frame - block.startFrame;
@@ -109,9 +108,10 @@ const CupBlock: React.FC<{
     ? Math.min(Math.max(elapsed / duration, 0), 1)
     : 0;
 
-  // 边框：左右和底边，根据是否是行首/行尾决定左边/右边
+  // 边框：只有最顶行有 borderTop，所有行都有 borderBottom，避免双线
   const borderLeft = isFirst ? `2px solid ${borderColor}` : `1px solid ${borderColor}`;
   const borderRight = isLast ? `2px solid ${borderColor}` : `1px solid ${borderColor}`;
+  const borderTopStyle = isTopRow ? `2px solid ${borderColor}` : 'none';
 
   return (
     <div
@@ -120,7 +120,7 @@ const CupBlock: React.FC<{
         left: block.x,
         width: block.width,
         height: rowHeight,
-        borderTop: `2px solid ${borderColor}`,
+        borderTop: borderTopStyle,
         borderBottom: `2px solid ${borderColor}`,
         borderLeft,
         borderRight,
@@ -128,7 +128,6 @@ const CupBlock: React.FC<{
         boxSizing: 'border-box',
         display: 'flex',
         alignItems: 'center',
-        justifyContent: 'center',
       }}
     >
       {/* 蓝色填充：从左向右增长 */}
@@ -142,26 +141,101 @@ const CupBlock: React.FC<{
           background: fillColor,
         }}
       />
-      {/* 标签文字 */}
-      {showLabel && (
-        <span
-          style={{
-            position: 'relative',
-            zIndex: 1,
-            color: textColor,
-            fontSize,
-            fontFamily,
-            fontWeight: 500,
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            paddingLeft: 4,
-            paddingRight: 4,
-          }}
-        >
-          {block.label}
-        </span>
-      )}
+      {/* 标签文字（滚动效果） */}
+      <ScrollingLabel
+        label={block.label}
+        blockWidth={block.width}
+        textColor={textColor}
+        fontSize={fontSize}
+        fontFamily={fontFamily}
+        startFrame={block.startFrame}
+        endFrame={block.endFrame}
+      />
+    </div>
+  );
+};
+
+// 滚动文字组件：文字过长时自动左右滚动
+const ScrollingLabel: React.FC<{
+  label: string;
+  blockWidth: number;
+  textColor: string;
+  fontSize: number;
+  fontFamily: string;
+  startFrame: number;
+  endFrame: number;
+}> = ({ label, blockWidth, textColor, fontSize, fontFamily, startFrame, endFrame }) => {
+  const frame = useCurrentFrame();
+  const textRef = React.useRef<HTMLSpanElement>(null);
+  const [textWidth, setTextWidth] = React.useState(0);
+  const padding = 8;
+  const availableWidth = blockWidth - padding * 2 - 4; // 4 for borders
+
+  React.useEffect(() => {
+    if (textRef.current) {
+      setTextWidth(textRef.current.scrollWidth);
+    }
+  }, [label, fontSize, fontFamily]);
+
+  const needsScroll = textWidth > availableWidth && availableWidth > 0;
+  const isActive = frame >= startFrame && frame <= endFrame;
+
+  // 文字过短时不显示
+  if (blockWidth < 36) return null;
+
+  // 不需要滚动
+  if (!needsScroll) {
+    return (
+      <span
+        style={{
+          position: 'relative',
+          zIndex: 1,
+          color: textColor,
+          fontSize,
+          fontFamily,
+          fontWeight: 500,
+          whiteSpace: 'nowrap',
+          paddingLeft: padding,
+          paddingRight: padding,
+        }}
+      >
+        {label}
+      </span>
+    );
+  }
+
+  // 滚动动画：在章节激活期间来回滚动
+  const scrollRange = textWidth - availableWidth;
+  const cycleFrames = 60; // 一个来回的帧数
+  const localFrame = isActive ? frame - startFrame : 0;
+  const progress = (localFrame % cycleFrames) / cycleFrames;
+  // 使用正弦波实现平滑来回滚动
+  const offset = scrollRange * (0.5 - 0.5 * Math.cos(progress * 2 * Math.PI));
+
+  return (
+    <div
+      style={{
+        position: 'relative',
+        zIndex: 1,
+        overflow: 'hidden',
+        width: availableWidth,
+        marginLeft: padding,
+      }}
+    >
+      <span
+        ref={textRef}
+        style={{
+          display: 'inline-block',
+          color: textColor,
+          fontSize,
+          fontFamily,
+          fontWeight: 500,
+          whiteSpace: 'nowrap',
+          transform: `translateX(${-offset}px)`,
+        }}
+      >
+        {label}
+      </span>
     </div>
   );
 };
@@ -180,8 +254,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   const usableWidth = width - theme.sidePadding * 2;
 
   const rowHeight = theme.rowHeight;
-  const rowGap = theme.rowGap;
-  const totalBarHeight = displayLevels * rowHeight + (displayLevels - 1) * rowGap;
+  const totalBarHeight = displayLevels * rowHeight;
   const barBottom = theme.bottomPadding;
 
   // 构建火焰图布局
@@ -206,12 +279,22 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
           fontFamily: theme.fontFamily,
           fontSize: theme.labelFontSize,
           color: '#ffffff',
-          opacity: currentNode ? interpolate(
-            frame,
-            [currentNode.startFrame, currentNode.startFrame + 10, currentNode.endFrame - 10, currentNode.endFrame],
-            [0, 1, 1, 0.3],
-            { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }
-          ) : 0,
+          opacity: (() => {
+            if (!currentNode) return 0;
+            const dur = currentNode.endFrame - currentNode.startFrame;
+            const fade = Math.min(10, Math.floor(dur / 3));
+            return interpolate(
+              frame,
+              [
+                currentNode.startFrame,
+                currentNode.startFrame + fade,
+                currentNode.endFrame - fade,
+                currentNode.endFrame,
+              ],
+              [0, 1, 1, 0.3],
+              { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }
+            );
+          })(),
         }}
       >
         {currentNode?.label ?? ''}
@@ -230,7 +313,8 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
         {/* 从下到上：row[0] = depth 1 (底部) → row[N-1] = depth N (顶部) */}
         {rows.map((rowBlocks, rowIdx) => {
           const colorIdx = rowIdx % theme.levelColors.length;
-          const rowBottom = rowIdx * (rowHeight + rowGap);
+          const rowBottom = rowIdx * rowHeight;
+          const isTopRow = rowIdx === rows.length - 1;
 
           return (
             <div
@@ -256,6 +340,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
                   rowHeight={rowHeight}
                   isFirst={blockIdx === 0}
                   isLast={blockIdx === rowBlocks.length - 1}
+                  isTopRow={isTopRow}
                 />
               ))}
             </div>

@@ -6,7 +6,6 @@ export interface ThemeConfig {
   textFontSize: number;
   fontFamily: string;
   rowHeight: number;
-  rowGap: number;
   sidePadding: number;
   bottomPadding: number;
   labelFontSize: number;
@@ -19,8 +18,7 @@ export const DefaultTheme: ThemeConfig = {
   textColor: '#ffffff',
   textFontSize: 13,
   fontFamily: 'SF Pro, -apple-system, BlinkMacSystemFont, sans-serif',
-  rowHeight: 28,
-  rowGap: 2,
+  rowHeight: 36,
   sidePadding: 40,
   bottomPadding: 20,
   labelFontSize: 14,
