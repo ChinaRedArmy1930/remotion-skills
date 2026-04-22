@@ -1,7 +1,6 @@
 import React from 'react';
 import { AbsoluteFill, useCurrentFrame, interpolate } from 'remotion';
 import type { TimedNode } from './types';
-import { getMaxDepth } from './timing';
 import type { ThemeConfig } from './styles';
 
 interface ProgressBarProps {
@@ -16,82 +15,163 @@ interface Block {
   label: string;
   x: number;
   width: number;
-  depth: number;
   startFrame: number;
   endFrame: number;
+  // 章节编号路径，如 "2.1.3"
+  sectionNumber: string;
 }
 
 /**
- * 从 TimedNode 树构建火焰图布局。
- * rows[0] = depth 1, rows[1] = depth 2, ...
- * 父节点宽度 = 所有子节点宽度之和，子节点严格对齐在父节点上方。
+ * 收集所有叶子节点，附带完整路径编号（DFS 顺序）
  */
-function buildFlameBlocks(
-  tree: TimedNode,
-  maxDisplayDepth: number,
-  usableWidth: number,
-  sidePadding: number
-): Block[][] {
-  const rows: Block[][] = [];
-
-  function getDuration(node: TimedNode): number {
-    if (node.children.length === 0) {
-      return node.endFrame - node.startFrame;
-    }
-    return node.children.reduce((sum, c) => sum + getDuration(c), 0);
+function collectLeavesWithPath(node: TimedNode, prefix: string): { node: TimedNode; path: string }[] {
+  if (node.children.length === 0) {
+    return [{ node, path: prefix }];
   }
-
-  function ensureRow(idx: number) {
-    while (rows.length <= idx) rows.push([]);
+  const result: { node: TimedNode; path: string }[] = [];
+  for (let i = 0; i < node.children.length; i++) {
+    const childPath = prefix ? `${prefix}.${i + 1}` : `${i + 1}`;
+    result.push(...collectLeavesWithPath(node.children[i], childPath));
   }
-
-  function layoutLevel(
-    nodes: TimedNode[],
-    startX: number,
-    totalWidth: number
-  ): Block[] {
-    const totalDuration = nodes.reduce((sum, n) => sum + getDuration(n), 0);
-    let currentX = startX;
-    const blocks: Block[] = [];
-
-    for (const node of nodes) {
-      const dur = getDuration(node);
-      const w = totalDuration > 0 ? (dur / totalDuration) * totalWidth : 0;
-      blocks.push({
-        label: node.label,
-        x: currentX,
-        width: w,
-        depth: node.depth,
-        startFrame: node.startFrame,
-        endFrame: node.endFrame,
-      });
-
-      // 递归布局子节点，存入对应的 row
-      if (node.children.length > 0 && node.depth < maxDisplayDepth) {
-        const childRowIdx = node.depth; // depth 1 的子节点放 rows[1]
-        ensureRow(childRowIdx);
-        const childBlocks = layoutLevel(node.children, currentX, w);
-        rows[childRowIdx].push(...childBlocks);
-      }
-
-      currentX += w;
-    }
-
-    return blocks;
-  }
-
-  // 布局 depth 1（底层）
-  ensureRow(0);
-  rows[0] = layoutLevel(tree.children, sidePadding, usableWidth);
-
-  return rows.slice(0, maxDisplayDepth);
+  return result;
 }
 
-// 单个"水杯"色块：边框始终可见，蓝色填充随进度增长
+/**
+ * 收集所有叶子节点（无编号）
+ */
+function collectLeaves(node: TimedNode): TimedNode[] {
+  if (node.children.length === 0) return [node];
+  const result: TimedNode[] = [];
+  for (const child of node.children) {
+    result.push(...collectLeaves(child));
+  }
+  return result;
+}
+
+/**
+ * 获取节点持续时间
+ */
+function getDuration(node: TimedNode): number {
+  if (node.children.length === 0) {
+    return node.endFrame - node.startFrame;
+  }
+  return node.children.reduce((sum, c) => sum + getDuration(c), 0);
+}
+
+/**
+ * 构建 2 层布局：
+ * bottomRow = tree.children（直接子节点）
+ * topRow = 所有叶子节点，对齐在各自父节点上方
+ */
+function buildTwoLayerBlocks(
+  tree: TimedNode,
+  usableWidth: number,
+  sidePadding: number
+): { bottomRow: Block[]; topRow: Block[] | null } {
+  if (tree.children.length === 0) {
+    return { bottomRow: [], topRow: null };
+  }
+
+  const bottomNodes = tree.children;
+  const totalBottomDuration = bottomNodes.reduce((sum, n) => sum + getDuration(n), 0);
+  let currentX = sidePadding;
+  const bottomRow: Block[] = [];
+  const parentRanges: { startX: number; endX: number }[] = [];
+
+  for (let i = 0; i < bottomNodes.length; i++) {
+    const node = bottomNodes[i];
+    const dur = getDuration(node);
+    const w = totalBottomDuration > 0 ? (dur / totalBottomDuration) * usableWidth : 0;
+    bottomRow.push({
+      label: node.label,
+      x: currentX,
+      width: w,
+      startFrame: node.startFrame,
+      endFrame: node.endFrame,
+      sectionNumber: `${i + 1}`,
+    });
+    parentRanges.push({ startX: currentX, endX: currentX + w });
+    currentX += w;
+  }
+
+  // 判断是否只有 1 层（tree.children 全是叶子）
+  const allChildrenAreLeaves = bottomNodes.every(n => n.children.length === 0);
+  if (allChildrenAreLeaves) {
+    return { bottomRow, topRow: null };
+  }
+
+  // 上层：所有叶子节点，带真实路径编号
+  const topRow: Block[] = [];
+  for (let i = 0; i < bottomNodes.length; i++) {
+    const parent = bottomNodes[i];
+    const range = parentRanges[i];
+    const leavesWithPath = collectLeavesWithPath(parent, `${i + 1}`);
+    const leavesTotalDuration = leavesWithPath.reduce((sum, l) => sum + getDuration(l.node), 0);
+    let leafX = range.startX;
+    const parentWidth = range.endX - range.startX;
+
+    for (const { node: leaf, path } of leavesWithPath) {
+      const dur = getDuration(leaf);
+      const w = leavesTotalDuration > 0 ? (dur / leavesTotalDuration) * parentWidth : 0;
+      topRow.push({
+        label: leaf.label,
+        x: leafX,
+        width: w,
+        startFrame: leaf.startFrame,
+        endFrame: leaf.endFrame,
+        sectionNumber: path,
+      });
+      leafX += w;
+    }
+  }
+
+  return { bottomRow, topRow };
+}
+
+/**
+ * 获取当前播放节点的完整路径编号，如 "2.1.3 MySQL"
+ */
+function getCurrentSectionLabel(
+  tree: TimedNode,
+  frame: number
+): string | null {
+  // DFS 找到当前帧对应的最深活跃节点，同时记录路径编号
+  function findDeepest(
+    node: TimedNode,
+    path: string
+  ): { node: TimedNode; path: string } | null {
+    const isActive = frame >= node.startFrame && frame <= node.endFrame;
+    if (!isActive) return null;
+
+    let deepest: { node: TimedNode; path: string } | null = { node, path };
+
+    for (let i = 0; i < node.children.length; i++) {
+      const childPath = path ? `${path}.${i + 1}` : `${i + 1}`;
+      const result = findDeepest(node.children[i], childPath);
+      if (result && result.node.depth > deepest!.node.depth) {
+        deepest = result;
+      }
+    }
+
+    return deepest;
+  }
+
+  // 从 root 的子节点开始编号
+  for (let i = 0; i < tree.children.length; i++) {
+    const result = findDeepest(tree.children[i], `${i + 1}`);
+    if (result) {
+      return `${result.path} ${result.node.label}`;
+    }
+  }
+  return null;
+}
+
+// 色块：白色粗边框 + 居中文字
 const CupBlock: React.FC<{
   block: Block;
   frame: number;
   fillColor: string;
+  surfaceColor: string;
   borderColor: string;
   textColor: string;
   fontSize: number;
@@ -100,18 +180,23 @@ const CupBlock: React.FC<{
   isFirst: boolean;
   isLast: boolean;
   isTopRow: boolean;
-}> = ({ block, frame, fillColor, borderColor, textColor, fontSize, fontFamily, rowHeight, isFirst, isLast, isTopRow }) => {
-  // 计算填充进度
+  isBottomRow: boolean;
+  barRadius: number;
+}> = ({ block, frame, fillColor, surfaceColor, borderColor, textColor, fontSize, fontFamily, rowHeight, isFirst, isLast, isTopRow, isBottomRow, barRadius }) => {
   const duration = block.endFrame - block.startFrame;
   const elapsed = frame - block.startFrame;
   const fillProgress = duration > 0
     ? Math.min(Math.max(elapsed / duration, 0), 1)
     : 0;
 
-  // 边框：只有最顶行有 borderTop，所有行都有 borderBottom，避免双线
-  const borderLeft = isFirst ? `2px solid ${borderColor}` : `1px solid ${borderColor}`;
-  const borderRight = isLast ? `2px solid ${borderColor}` : `1px solid ${borderColor}`;
-  const borderTopStyle = isTopRow ? `2px solid ${borderColor}` : 'none';
+  // 当前正在播放的章节显示编号+名称，否则只显示名称
+  const isActive = frame >= block.startFrame && frame <= block.endFrame;
+  const displayLabel = isActive ? `${block.sectionNumber} ${block.label}` : block.label;
+
+  const rtl = isTopRow && isFirst ? barRadius : 0;
+  const rtr = isTopRow && isLast ? barRadius : 0;
+  const rbl = isBottomRow && isFirst ? barRadius : 0;
+  const rbr = isBottomRow && isLast ? barRadius : 0;
 
   return (
     <div
@@ -120,17 +205,19 @@ const CupBlock: React.FC<{
         left: block.x,
         width: block.width,
         height: rowHeight,
-        borderTop: borderTopStyle,
-        borderBottom: `2px solid ${borderColor}`,
-        borderLeft,
-        borderRight,
+        background: surfaceColor,
+        border: `1.5px solid ${borderColor}`,
         overflow: 'hidden',
         boxSizing: 'border-box',
         display: 'flex',
         alignItems: 'center',
+        justifyContent: 'center',
+        borderTopLeftRadius: rtl,
+        borderTopRightRadius: rtr,
+        borderBottomLeftRadius: rbl,
+        borderBottomRightRadius: rbr,
       }}
     >
-      {/* 蓝色填充：从左向右增长 */}
       <div
         style={{
           position: 'absolute',
@@ -141,9 +228,8 @@ const CupBlock: React.FC<{
           background: fillColor,
         }}
       />
-      {/* 标签文字（滚动效果） */}
       <ScrollingLabel
-        label={block.label}
+        label={displayLabel}
         blockWidth={block.width}
         textColor={textColor}
         fontSize={fontSize}
@@ -155,7 +241,7 @@ const CupBlock: React.FC<{
   );
 };
 
-// 滚动文字组件：文字过长时自动左右滚动
+// 滚动文字组件（居中）
 const ScrollingLabel: React.FC<{
   label: string;
   blockWidth: number;
@@ -168,8 +254,8 @@ const ScrollingLabel: React.FC<{
   const frame = useCurrentFrame();
   const textRef = React.useRef<HTMLSpanElement>(null);
   const [textWidth, setTextWidth] = React.useState(0);
-  const padding = 8;
-  const availableWidth = blockWidth - padding * 2 - 4; // 4 for borders
+  const padding = 6;
+  const availableWidth = blockWidth - padding * 2 - 3; // 3 for border
 
   React.useEffect(() => {
     if (textRef.current) {
@@ -180,10 +266,8 @@ const ScrollingLabel: React.FC<{
   const needsScroll = textWidth > availableWidth && availableWidth > 0;
   const isActive = frame >= startFrame && frame <= endFrame;
 
-  // 文字过短时不显示
   if (blockWidth < 36) return null;
 
-  // 不需要滚动
   if (!needsScroll) {
     return (
       <span
@@ -194,9 +278,10 @@ const ScrollingLabel: React.FC<{
           fontSize,
           fontFamily,
           fontWeight: 500,
+          letterSpacing: '-0.224px',
           whiteSpace: 'nowrap',
-          paddingLeft: padding,
-          paddingRight: padding,
+          textAlign: 'center',
+          width: availableWidth,
         }}
       >
         {label}
@@ -204,12 +289,10 @@ const ScrollingLabel: React.FC<{
     );
   }
 
-  // 滚动动画：在章节激活期间来回滚动
   const scrollRange = textWidth - availableWidth;
-  const cycleFrames = 60; // 一个来回的帧数
+  const cycleFrames = 60;
   const localFrame = isActive ? frame - startFrame : 0;
   const progress = (localFrame % cycleFrames) / cycleFrames;
-  // 使用正弦波实现平滑来回滚动
   const offset = scrollRange * (0.5 - 0.5 * Math.cos(progress * 2 * Math.PI));
 
   return (
@@ -219,7 +302,6 @@ const ScrollingLabel: React.FC<{
         zIndex: 1,
         overflow: 'hidden',
         width: availableWidth,
-        marginLeft: padding,
       }}
     >
       <span
@@ -230,6 +312,7 @@ const ScrollingLabel: React.FC<{
           fontSize,
           fontFamily,
           fontWeight: 500,
+          letterSpacing: '-0.224px',
           whiteSpace: 'nowrap',
           transform: `translateX(${-offset}px)`,
         }}
@@ -248,27 +331,54 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   height,
 }) => {
   const frame = useCurrentFrame();
-  const maxDepth = getMaxDepth(tree);
 
-  const displayLevels = Math.min(maxDepth, 3);
   const usableWidth = width - theme.sidePadding * 2;
-
   const rowHeight = theme.rowHeight;
-  const totalBarHeight = displayLevels * rowHeight;
+  const { bottomRow, topRow } = buildTwoLayerBlocks(tree, usableWidth, theme.sidePadding);
+  const hasTwoRows = topRow !== null;
+  const totalRows = hasTwoRows ? 2 : (bottomRow.length > 0 ? 1 : 0);
+  const totalBarHeight = totalRows * rowHeight;
   const barBottom = theme.bottomPadding;
 
-  // 构建火焰图布局
-  const rows = buildFlameBlocks(tree, displayLevels, usableWidth, theme.sidePadding);
+  // 当前章节：显示 X.X.X 格式
+  const sectionLabel = getCurrentSectionLabel(tree, frame);
 
-  // 当前章节标题
-  const allNodes = flattenNodesSimple(tree);
-  const currentNode = allNodes
-    .filter((n) => frame >= n.startFrame && frame <= n.endFrame)
-    .sort((a, b) => b.depth - a.depth)[0];
+  const renderRow = (blocks: Block[], rowIdx: number, isTop: boolean, isBottom: boolean) => (
+    <div
+      key={`row-${rowIdx}`}
+      style={{
+        position: 'absolute',
+        bottom: rowIdx * rowHeight,
+        left: 0,
+        width,
+        height: rowHeight,
+      }}
+    >
+      {blocks.map((block, blockIdx) => (
+        <CupBlock
+          key={`block-${rowIdx}-${blockIdx}`}
+          block={block}
+          frame={frame}
+          fillColor={theme.fillColor}
+          surfaceColor={theme.surfaceColor}
+          borderColor={theme.borderColor}
+          textColor={theme.textColor}
+          fontSize={theme.textFontSize}
+          fontFamily={theme.fontFamily}
+          rowHeight={rowHeight}
+          isFirst={blockIdx === 0}
+          isLast={blockIdx === blocks.length - 1}
+          isTopRow={isTop}
+          isBottomRow={isBottom}
+          barRadius={theme.barRadius}
+        />
+      ))}
+    </div>
+  );
 
   return (
     <AbsoluteFill style={{ background: theme.background }}>
-      {/* 当前章节标题 */}
+      {/* 当前章节标题：X.X.X 格式 */}
       <div
         style={{
           position: 'absolute',
@@ -278,8 +388,14 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
           textAlign: 'center',
           fontFamily: theme.fontFamily,
           fontSize: theme.labelFontSize,
+          fontWeight: 600,
+          letterSpacing: '-0.224px',
           color: '#ffffff',
-          opacity: (() => {
+          opacity: sectionLabel ? (() => {
+            const allNodes = flattenNodesSimple(tree);
+            const currentNode = allNodes
+              .filter((n) => frame >= n.startFrame && frame <= n.endFrame)
+              .sort((a, b) => b.depth - a.depth)[0];
             if (!currentNode) return 0;
             const dur = currentNode.endFrame - currentNode.startFrame;
             const fade = Math.min(10, Math.floor(dur / 3));
@@ -294,10 +410,10 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
               [0, 1, 1, 0.3],
               { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }
             );
-          })(),
+          })() : 0,
         }}
       >
-        {currentNode?.label ?? ''}
+        {sectionLabel ?? ''}
       </div>
 
       {/* 进度条区域 */}
@@ -310,42 +426,14 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
           height: totalBarHeight,
         }}
       >
-        {/* 从下到上：row[0] = depth 1 (底部) → row[N-1] = depth N (顶部) */}
-        {rows.map((rowBlocks, rowIdx) => {
-          const colorIdx = rowIdx % theme.levelColors.length;
-          const rowBottom = rowIdx * rowHeight;
-          const isTopRow = rowIdx === rows.length - 1;
-
-          return (
-            <div
-              key={`row-${rowIdx}`}
-              style={{
-                position: 'absolute',
-                bottom: rowBottom,
-                left: 0,
-                width,
-                height: rowHeight,
-              }}
-            >
-              {rowBlocks.map((block, blockIdx) => (
-                <CupBlock
-                  key={`block-${rowIdx}-${blockIdx}`}
-                  block={block}
-                  frame={frame}
-                  fillColor={theme.levelColors[colorIdx]}
-                  borderColor={theme.borderColor}
-                  textColor={theme.textColor}
-                  fontSize={theme.textFontSize}
-                  fontFamily={theme.fontFamily}
-                  rowHeight={rowHeight}
-                  isFirst={blockIdx === 0}
-                  isLast={blockIdx === rowBlocks.length - 1}
-                  isTopRow={isTopRow}
-                />
-              ))}
-            </div>
-          );
-        })}
+        {hasTwoRows ? (
+          <>
+            {renderRow(topRow!, 1, true, false)}
+            {renderRow(bottomRow, 0, false, true)}
+          </>
+        ) : (
+          renderRow(bottomRow, 0, true, true)
+        )}
       </div>
     </AbsoluteFill>
   );
